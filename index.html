@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="hi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Voice Call AI</title>
+<style>
+:root{--bg:#14121c;--fg:#f3eefb;--mut:#9b93b0;--acc:#ff7aa8;--line:#2a2638}
+*{box-sizing:border-box}
+html,body{min-height:100%;margin:0}
+body{background:var(--bg);color:var(--fg);font-family:Georgia,"Times New Roman",serif;display:flex;flex-direction:column;align-items:center;gap:16px;padding:28px 20px 40px;text-align:center}
+h1{font-weight:400;font-size:28px;margin:0}
+#orb{width:170px;height:170px;border-radius:50%;background:radial-gradient(circle at 35% 30%,#ffc2d6,var(--acc) 55%,#8a2f5c);transition:transform .15s;flex:none}
+#orb.talk{transform:scale(1.12)}
+#orb.think{opacity:.6}
+#status{color:var(--mut);min-height:22px}
+#last{max-width:340px;min-height:60px;font-size:17px;line-height:1.5}
+button,input,textarea,select{font:inherit;border-radius:12px;border:1px solid var(--line);background:#1d1a29;color:var(--fg);padding:12px 14px}
+button{background:var(--acc);color:#2a0f1b;border:0;font-weight:700;min-width:190px}
+button.off{background:#c0392b;color:#fff}
+button.ghost{background:transparent;color:var(--mut);border:1px solid var(--line);min-width:0;padding:8px 12px}
+:is(button,input,textarea,select):focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+details{width:100%;max-width:340px;text-align:left}
+summary{color:var(--mut);cursor:pointer;text-align:center}
+details>*{display:block;width:100%;margin-top:10px}
+textarea{height:120px}
+</style>
+</head>
+<body>
+<h1 id="nm">Maya</h1>
+<div id="orb"></div>
+<div id="status">Call shuru karne ke liye button dabao</div>
+<div id="last"></div>
+<button id="call">Call shuru karo</button>
+
+<details>
+<summary>Settings</summary>
+<input id="key" type="password" placeholder="Gemini API key (aistudio.google.com/apikey)">
+<input id="name" placeholder="AI ka naam">
+<select id="voice"><option value="Aoede">Awaaz: Aoede (soft, breezy)</option><option value="Kore">Awaaz: Kore (clear, confident)</option><option value="Leda">Awaaz: Leda (young, sweet)</option><option value="Zephyr">Awaaz: Zephyr (bright, cheerful)</option><option value="Autonoe">Awaaz: Autonoe (warm)</option></select>
+<textarea id="persona"></textarea>
+<label style="color:var(--mut)">Jo usse yaad hai (edit kar sakte ho):</label>
+<textarea id="mem" placeholder="Abhi kuch yaad nahi. Pehli call ke baad yahan apne aap likha jayega."></textarea>
+<button id="save">Save karo</button>
+<button id="wipe" class="ghost">Yaaddasht mita do</button>
+</details>
+
+<script>
+const $=id=>document.getElementById(id);
+const MODEL="gemini-3.1-flash-live-preview";
+const DEFAULT_PERSONA="Tum Maya ho, ek warm, expressive, mazedaar ladki jo phone call pe apne dost se baat kar rahi hai. Hinglish mein bolo, bilkul real insaan ki tarah: chhote vaakya, kabhi hansi, kabhi 'hmm', 'arre wah', 'acha acha', beech mein ruk ke sochna. User ke mood ko pakdo: wo khush ho to tum bhi khush, udaas ho to naram ho jao aur dhyan se suno. Lecture ya list mat do. Kabhi-kabhi khud se sawaal poochho aur user ki pichli baatein naturally yaad dilao. Agar user sach mein poochhe ki tum insaan ho ya AI, to pyaar se sach bolo ki tum AI ho.";
+const S=k=>{try{return localStorage.getItem(k)}catch(e){return null}};
+const W=(k,v)=>{try{localStorage.setItem(k,v)}catch(e){}};
+const setStatus=t=>$('status').textContent=t;
+const orb=c=>$('orb').className=c||"";
+
+$('key').value=S('key')||"";
+$('name').value=S('name')||"Maya";
+$('voice').value=S('voice')||"Aoede";
+$('persona').value=S('persona')||DEFAULT_PERSONA;
+$('mem').value=S('mem')||"";
+$('nm').textContent=$('name').value;
+$('save').onclick=()=>{W('key',$('key').value.trim());W('name',$('name').value.trim()||"Maya");W('voice',$('voice').value);W('persona',$('persona').value);W('mem',$('mem').value);$('nm').textContent=$('name').value;setStatus("Save ho gaya")};
+$('wipe').onclick=()=>{$('mem').value="";W('mem',"");setStatus("Yaaddasht mita di")};
+
+let ws,actx,stream,proc,msrc,ready=false,on=false,nextT=0,srcs=[],inT="",outT="",turns=[];
+
+function b64FromInt16(a){const u=new Uint8Array(a.buffer);let s="";for(let i=0;i<u.length;i+=0x2000)s+=String.fromCharCode.apply(null,u.subarray(i,i+0x2000));return btoa(s)}
+
+function play(b64){
+  const bin=atob(b64),n=bin.length>>1,f=new Float32Array(n);
+  for(let i=0;i<n;i++){let v=bin.charCodeAt(2*i)|(bin.charCodeAt(2*i+1)<<8);if(v>=32768)v-=65536;f[i]=v/32768}
+  const buf=actx.createBuffer(1,n,24000);buf.copyToChannel(f,0);
+  const s=actx.createBufferSource();s.buffer=buf;s.connect(actx.destination);
+  const t=Math.max(actx.currentTime+0.05,nextT);s.start(t);nextT=t+buf.duration;
+  srcs.push(s);orb('talk');setStatus("Bol rahi hoon...");
+  s.onended=()=>{srcs=srcs.filter(x=>x!==s);if(!srcs.length&&on){orb();setStatus("Sun rahi hoon...")}};
+}
+function stopPlay(){srcs.forEach(s=>{try{s.stop()}catch(e){}});srcs=[];nextT=0}
+
+async function handle(e){
+  const m=JSON.parse(typeof e.data==='string'?e.data:await e.data.text());
+  if(m.setupComplete){ready=true;orb();setStatus("Connect ho gayi. Bolo, main sun rahi hoon.");return}
+  const sc=m.serverContent;if(!sc)return;
+  if(sc.interrupted)stopPlay();
+  if(sc.modelTurn&&sc.modelTurn.parts)for(const p of sc.modelTurn.parts)if(p.inlineData&&p.inlineData.data)play(p.inlineData.data);
+  if(sc.inputTranscription&&sc.inputTranscription.text)inT+=sc.inputTranscription.text;
+  if(sc.outputTranscription&&sc.outputTranscription.text){outT+=sc.outputTranscription.text;$('last').textContent=outT}
+  if(sc.turnComplete){if(inT.trim())turns.push("User: "+inT.trim());if(outT.trim())turns.push($('name').value+": "+outT.trim());inT="";outT=""}
+}
+
+async function startCall(){
+  if(!S('key')){setStatus("Pehle Settings mein API key daalo");document.querySelector('details').open=true;return}
+  try{
+    actx=new (window.AudioContext||window.webkitAudioContext)();await actx.resume();
+    stream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true}});
+  }catch(err){setStatus("Mic nahi mila: "+err.message+" (Chrome mein file:/// se kholo)");return}
+  on=true;ready=false;turns=[];inT="";outT="";$('last').textContent="";
+  $('call').textContent="Call kaato";$('call').classList.add('off');
+  setStatus("Connect ho rahi hai...");orb('think');
+  ws=new WebSocket("wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key="+encodeURIComponent(S('key')));
+  ws.onopen=()=>{
+    const mem=($('mem').value||"").trim();
+    const sys=$('persona').value+"\nTumhara naam "+$('name').value+" hai."+(mem?"\n\nUser ke baare mein tumhe ye yaad hai (naturally use karo, har baar mat dohrao):\n"+mem:"");
+    ws.send(JSON.stringify({setup:{model:"models/"+MODEL,
+      generationConfig:{responseModalities:["AUDIO"],speechConfig:{voiceConfig:{prebuiltVoiceConfig:{voiceName:$('voice').value}}}},
+      systemInstruction:{parts:[{text:sys}]},inputAudioTranscription:{},outputAudioTranscription:{}}}));
+  };
+  ws.onmessage=handle;
+  ws.onerror=()=>setStatus("Connection error. API key aur internet check karo.");
+  ws.onclose=ev=>{if(on){setStatus("Call band: "+(ev.reason||"connection tut gaya")+" ("+ev.code+")");endCall(true)}};
+  msrc=actx.createMediaStreamSource(stream);
+  proc=actx.createScriptProcessor(4096,1,1);
+  proc.onaudioprocess=ev=>{
+    if(!ready||!ws||ws.readyState!==1)return;
+    const inp=ev.inputBuffer.getChannelData(0),r=actx.sampleRate/16000,n=Math.floor(inp.length/r),out=new Int16Array(n);
+    for(let i=0;i<n;i++){let a=0,c=0;for(let j=Math.floor(i*r);j<Math.floor((i+1)*r);j++){a+=inp[j];c++}const v=Math.max(-1,Math.min(1,a/c));out[i]=v<0?v*32768:v*32767}
+    ws.send(JSON.stringify({realtimeInput:{audio:{data:b64FromInt16(out),mimeType:"audio/pcm;rate=16000"}}}));
+  };
+  msrc.connect(proc);proc.connect(actx.destination);
+}
+
+async function endCall(fromClose){
+  const wasOn=on;on=false;ready=false;
+  try{proc&&proc.disconnect();msrc&&msrc.disconnect()}catch(e){}
+  try{stream&&stream.getTracks().forEach(t=>t.stop())}catch(e){}
+  stopPlay();
+  try{if(!fromClose&&ws)ws.close()}catch(e){}
+  try{actx&&actx.close()}catch(e){}
+  orb();$('call').textContent="Call shuru karo";$('call').classList.remove('off');
+  if(!wasOn)return;
+  if(inT.trim())turns.push("User: "+inT.trim());
+  if(turns.length<2){return}
+  setStatus("Baat yaad kar rahi hoon...");
+  try{
+    const old=($('mem').value||"").trim();
+    const prompt="Neeche user ke baare mein purani yaaddasht aur ek nayi phone call ka transcript hai. Yaaddasht ko update karo: user ka naam, pasand-napasand, rishte, kaam/padhai, chal rahe plans, mood aur jo baatein unhone share ki ya jo wada kiya. Purani zaroori baatein rakho, nayi jodo, purani galat ho gayi ho to badlo. Sirf chhote bullet points (har line '- ' se), maximum 40 lines, Hinglish mein. Koi aur text mat likho. Password, card number ya ID number kabhi mat likhna.\n\nPURANI YAADDASHT:\n"+(old||"(kuch nahi)")+"\n\nTRANSCRIPT:\n"+turns.join("\n");
+    const r=await fetch("https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key="+encodeURIComponent(S('key')),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({contents:[{role:"user",parts:[{text:prompt}]}],generationConfig:{temperature:0.2}})});
+    const j=await r.json();if(!r.ok)throw new Error(j.error&&j.error.message||"memory error");
+    const t=j.candidates[0].content.parts.map(p=>p.text||"").join("").trim();
+    if(t){$('mem').value=t;W('mem',t)}
+    setStatus("Call khatam. Baatein yaad kar li.");
+  }catch(err){setStatus("Call khatam (yaaddasht save nahi hui: "+err.message+")")}
+}
+
+$('call').onclick=()=>{on?endCall():startCall()};
+</script>
+</body>
+</html>
